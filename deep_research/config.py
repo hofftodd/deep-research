@@ -100,8 +100,11 @@ class Settings:
         "Chrome/124.0 Safari/537.36 DeepResearch/1.0"
     )
 
-    # What to do with report paragraphs that carry no citation: "drop" or "flag".
+    # What to do with report passages that carry no citation, or whose citation the check finds
+    # unsupported: "drop" or "flag".
     uncited_policy: str = "drop"
+    # Check each cited statement against its sources' notes (one extra model call per section).
+    verify_citations: bool = True
 
     data_dir: Path = field(default_factory=lambda: Path("data"))
     worker_concurrency: int = 1
@@ -159,6 +162,7 @@ class Settings:
             fetch_timeout=_float("FETCH_TIMEOUT", cls.fetch_timeout),
             max_page_chars=_int("MAX_PAGE_CHARS", cls.max_page_chars),
             uncited_policy=e("UNCITED_POLICY", cls.uncited_policy).lower(),
+            verify_citations=e("VERIFY_CITATIONS", "true").lower() not in ("0", "false", "no", "off"),
             data_dir=Path(e("DATA_DIR", "data")),
             worker_concurrency=_int("WORKER_CONCURRENCY", cls.worker_concurrency),
         )

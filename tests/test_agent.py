@@ -124,7 +124,7 @@ def test_failed_note_extraction_skips_that_page_only(tmp_path):
 
 def test_failed_planning_review_section_and_summary_degrade_gracefully(tmp_path):
     db, tid, agent = make(tmp_path, FlakyLLM(
-        "research questions that together", "Assess whether", "executive summary", "This section answers: How do"))
+        "research questions that together", "Assess whether", "executive summary"))
     agent.run()
     t = db.get_topic(tid)
     assert t["status"] == "completed"
@@ -132,14 +132,15 @@ def test_failed_planning_review_section_and_summary_degrade_gracefully(tmp_path)
     assert "Planning failed" in log and "Could not write the summary" in log
     # Planning fell back to the title as the only question; its section was still written.
     assert [q["text"] for q in db.questions(tid)] == ["Sodium-ion batteries for grid storage"]
-    assert "## Summary" not in t["report_md"] and "## Findings" in t["report_md"]
+    assert "## Summary" not in t["report_md"] and "## How sodium-ion cells work" in t["report_md"]
 
 
 def test_failed_section_is_left_out(tmp_path):
-    db, tid, agent = make(tmp_path, FlakyLLM("This section answers: How do"))
+    db, tid, agent = make(tmp_path, FlakyLLM('Write the section "Costs and deployment"'))
     agent.run()
     t = db.get_topic(tid)
-    assert t["status"] == "completed" and t["report_md"].count("## Findings") == 1
+    assert t["status"] == "completed"
+    assert "## How sodium-ion cells work" in t["report_md"] and "## Costs and deployment" not in t["report_md"]
     assert any("Could not write the section" in m for m in messages(db, tid))
 
 
@@ -174,3 +175,148 @@ def test_client_warnings_and_usage_reach_the_activity_log(tmp_path):
     log = messages(db, tid)
     assert "The model is still thinking" in log
     assert any(m.startswith("Model usage:") for m in log)
+
+
+# ---- report outline (section merging) -----------------------------------------------------------
+def test_outline_merges_questions_into_themed_sections(tmp_path):
+    llm = FakeLLM()
+    db, tid, agent = make(tmp_path, llm)
+    agent.run()
+    md = db.get_topic(tid)["report_md"]
+    # Sections follow the model's outline (heading markup stripped), not the research questions.
+    assert "## How sodium-ion cells work" in md and "## Costs and deployment" in md
+    assert "What are sodium-ion batteries" not in md.split("## Scope")[0]
+
+    outline = agent.make_outline(db.notes(tid))
+    ids = [i for sec in outline for i in sec["note_ids"]]
+    assert len(ids) == len(set(ids))                        # each note in one section only
+    assert set(ids) <= {n["id"] for n in db.notes(tid)}     # invented id N424242 ignored
+
+    section_prompts = [p for p in llm.prompts if "one section of a research report" in p]
+    assert len(section_prompts) == 2
+    assert "1. How sodium-ion cells work   <- this section" in section_prompts[0]
+    assert "2. Costs and deployment" in section_prompts[0]   # writer sees the whole outline
+
+
+def test_unusable_outline_falls_back_to_one_section_per_question(tmp_path):
+    db, tid, agent = make(tmp_path, FakeLLM(outline=False))
+    agent.run()
+    md = db.get_topic(tid)["report_md"]
+    assert "## What are sodium-ion batteries" in md and "## How do they perform for grid storage" in md
+    assert any("no usable outline" in e["message"] for e in db.events(tid))
+
+
+def test_failed_outline_call_falls_back(tmp_path):
+    db, tid, agent = make(tmp_path, FlakyLLM("planning the structure"))
+    agent.run()
+    assert db.get_topic(tid)["status"] == "completed"
+    assert any("Could not plan the report outline" in e["message"] for e in db.events(tid))
+
+
+def test_notes_beyond_the_outline_budget_join_their_question_section(tmp_path):
+    db, tid, agent = make(tmp_path)
+    agent.run()
+    notes = db.notes(tid)
+    agent.s.llm_context_chars = 3000 + 90  # room to list only the first note or so
+    outline = agent.make_outline(notes)
+    assert sorted(i for sec in outline for i in sec["note_ids"]) == sorted(n["id"] for n in notes)
+
+
+def test_summary_sees_every_section(tmp_path):
+    llm = FakeLLM()
+    db, tid, agent = make(tmp_path, llm)
+    agent.run()
+    summary_prompt = next(p for p in llm.prompts if "executive summary" in p)
+    assert "## How sodium-ion cells work" in summary_prompt and "## Costs and deployment" in summary_prompt
+
+
+# ---- citation verification ----------------------------------------------------------------------
+def test_unsupported_statements_are_removed_and_reported(tmp_path):
+    db, tid, agent = make(tmp_path, FakeLLM(unsupported=("favour",)))
+    agent.run()
+    t = db.get_topic(tid)
+    body = t["report_md"].split("## Scope")[0]
+    assert "favour" not in body and "abundant and cheap" in body
+    assert "were removed as unsupported" in t["report_md"]
+    log = "\n".join(e["message"] for e in db.events(tid))
+    assert "Unsupported:\n• “Grid projects favour cost.” (not in evidence)" in log
+
+
+def test_unsupported_statements_flagged_with_flag_policy(tmp_path):
+    db, tid, agent = make(tmp_path, FakeLLM(unsupported=("favour",)))
+    agent.s.uncited_policy = "flag"
+    agent.run()
+    md = db.get_topic(tid)["report_md"]
+    assert md.count("Grid projects favour cost [1, 2]. *[unverified]*") == 2
+    assert "are marked *[unverified]*" in md
+
+
+def _verifier(tmp_path, llm):
+    db, tid, agent = make(tmp_path, llm)
+    agent._notes_by_source = {
+        1: [{"claim": "Sodium is plentiful", "quote": "sodium is plentiful in seawater"}],
+        2: [{"claim": "Sodium is abundant", "quote": "sodium is abundant in the crust"}],
+    }
+    agent.verify_stats = dict.fromkeys(("checked", "supported", "recited", "removed", "flagged", "unchecked"), 0)
+    return db, tid, agent
+
+
+def test_misattributed_statement_is_recited_to_the_supporting_source(tmp_path):
+    _, _, agent = _verifier(tmp_path, FakeLLM(wrong_source=("abundant", 2)))
+    out = agent.verify_citations("Sodium is abundant [S1]. It is plentiful [S1, S2].", "test")
+    assert out == "Sodium is abundant [S2]. It is plentiful [S1, S2]."
+    assert agent.verify_stats["recited"] == 1 and agent.verify_stats["supported"] == 1
+
+
+def test_recite_to_a_source_outside_the_evidence_removes_instead(tmp_path):
+    _, _, agent = _verifier(tmp_path, FakeLLM(wrong_source=("abundant", 99)))
+    out = agent.verify_citations("Sodium is abundant [S1]. It is plentiful [S2].", "test")
+    assert out == "It is plentiful [S2]." and agent.verify_stats["removed"] == 1
+
+
+def test_verifier_sees_quotes_from_every_cited_source(tmp_path):
+    llm = FakeLLM()
+    _, _, agent = _verifier(tmp_path, llm)
+    agent.verify_citations("A [S1]. B [S2].", "test")
+    prompt = llm.prompts[-1]
+    assert '[S1] Sodium is plentiful (quote: "sodium is plentiful in seawater")' in prompt
+    assert "1. A. (cites: S1)" in prompt and "2. B. (cites: S2)" in prompt
+
+
+def test_missing_verdicts_and_failed_checks_keep_text(tmp_path):
+    db, tid, agent = _verifier(tmp_path, FlakyLLM("Check each numbered statement"))
+    out = agent.verify_citations("A [S1]. B [S2].", "test")
+    assert out == "A [S1]. B [S2]." and agent.verify_stats["unchecked"] == 2
+    assert any("Could not check the citations" in e["message"] for e in db.events(tid))
+
+    class PartialLLM(FakeLLM):
+        def chat_json(self, system, user, mode="fast", retries=2):
+            return {"results": [{"id": "1", "verdict": "supported"}]}  # says nothing about #2
+
+    _, _, agent = _verifier(tmp_path, PartialLLM())
+    assert agent.verify_citations("A [S1]. B [S2].", "test") == "A [S1]. B [S2]."
+    assert agent.verify_stats["unchecked"] == 1 and agent.verify_stats["supported"] == 1
+
+
+def test_verification_can_be_turned_off(tmp_path):
+    llm = FakeLLM(unsupported=("favour",))
+    db, tid, agent = make(tmp_path, llm)
+    agent.s.verify_citations = False
+    agent.run()
+    assert not any("Check each numbered statement" in p for p in llm.prompts)
+    assert "favour" in db.get_topic(tid)["report_md"]
+
+
+def test_outline_that_drops_most_notes_falls_back(tmp_path):
+    class StingyLLM(FakeLLM):
+        def chat_json(self, system, user, mode="fast", retries=2):
+            if "planning the structure" in user:
+                first = re.search(r"^N(\d+) ", user, re.M).group(1)
+                return {"sections": [{"heading": "Just one note", "notes": [f"N{first}"]}]}
+            return super().chat_json(system, user, mode=mode)
+
+    db, tid, agent = make(tmp_path, StingyLLM())
+    agent.run()
+    md = db.get_topic(tid)["report_md"]
+    assert "Just one note" not in md and "## What are sodium-ion batteries" in md
+    assert any("used only" in e["message"] for e in db.events(tid))

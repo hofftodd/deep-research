@@ -103,8 +103,15 @@ topic ──► plan: 3–5 research questions
   │    review coverage: sufficient?  ── no ─► follow-up questions ──┘
   │            │ yes / limits reached
   ▼            ▼
-write one section per question from its notes ─► executive summary ─► citation checks ─► report
+outline: model groups all notes into 3–7 themed sections (merging overlapping questions)
+  ─► write each section from its notes, knowing the whole outline
+  ─► citation checks + verification ─► executive summary (sees every section) ─► report
 ```
+
+The outline step is what turns per-question research into a readable report: background first,
+then findings, comparisons and open issues, with overlapping material merged. The code validates
+the outline (only real notes, each used once). If the model can't produce a usable outline, the
+report falls back to one section per research question.
 
 ### How citations are guaranteed
 
@@ -119,14 +126,29 @@ write one section per question from its notes ─► executive summary ─► ci
      (or marked *[citation needed]* with `UNCITED_POLICY=flag`), and the removal is logged in the activity feed;
    - citations are renumbered `[1]`, `[2]`… by first appearance;
    - the **References** list (title, site, URL, access date) is generated from the database, never by the model.
-4. **Safe rendering.** Model-written text is untrusted, since web pages can try to inject instructions.
+4. **Citation verification.** Each section and the summary are split into *cited statements*: a
+   citation plus all the text since the previous one, so uncited sentences before a citation are
+   checked too. The model checks every statement against the notes and verbatim quotes from the
+   sources it cites:
+   - **supported**: kept;
+   - **wrong source**: the citation is replaced with the source that does support it (only a
+     source present in the evidence is accepted);
+   - **unsupported** (not backed up, or adds numbers, dates, causes or certainty the evidence lacks):
+     removed, or marked *[unverified]* with `UNCITED_POLICY=flag`.
+
+   The activity log lists each removed statement and the reason. The report's *Scope and
+   limitations* section states how many statements were checked, confirmed, re-attributed and
+   removed. If a check can't run, the text is kept and counted as unchecked. This costs one
+   extra model call per section; turn it off with `VERIFY_CITATIONS=false`.
+5. **Safe rendering.** Model-written text is untrusted, since web pages can try to inject instructions.
    Raw HTML is escaped, images are removed, and only `http(s)` links survive in the rendered report.
 
 The final report also states which model produced it and lists any research questions that
 could not be answered.
 
-A local model can still misread a source, so a cited sentence is not a guaranteed-correct one.
-The citations exist so you can check claims quickly; click a citation number to jump to its reference.
+Verification is done by the same local model, so it reduces errors but can't eliminate them: a
+model can wrongly confirm a statement or wrongly reject a good one. The citations exist so you can
+check claims quickly; click a citation number to jump to its reference.
 
 ## Configuration
 
@@ -149,7 +171,8 @@ All settings are environment variables (or `.env`); see [`.env.example`](.env.ex
 | `MAX_QUESTIONS` | `5` | Initial questions / follow-ups per round |
 | `MAX_SOURCES` | `25` | Total sources that contribute notes |
 | `SOURCES_PER_QUESTION` | `3` | Sources read per question per round |
-| `UNCITED_POLICY` | `drop` | `drop` or `flag` uncited passages |
+| `VERIFY_CITATIONS` | `true` | Check each cited statement against its sources' notes |
+| `UNCITED_POLICY` | `drop` | `drop` or `flag` passages that are uncited or fail verification |
 | `DATA_DIR` | `data` | Where the SQLite database lives |
 
 Run on another interface/port with `python -m deep_research --host 0.0.0.0 --port 8080`.

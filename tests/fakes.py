@@ -52,12 +52,17 @@ class FakeFetcher:
 class FakeLLM:
     """Answers based on which prompt it receives, the way the agent would use a real model."""
 
-    def __init__(self, model="fake-model", cite_bogus=False, uncited_paragraph=False):
+    def __init__(self, model="fake-model", cite_bogus=False, uncited_paragraph=False,
+                 unsupported=(), wrong_source=None, outline=True):
         self.model = model
         self.cite_bogus = cite_bogus
         self.uncited_paragraph = uncited_paragraph
+        self.unsupported = unsupported      # statements containing these words fail verification
+        self.wrong_source = wrong_source    # (word, source_id): statements with word belong to source_id
+        self.outline = outline              # False: return an unusable outline
         self.calls = 0
         self.modes = []
+        self.prompts = []
         self.stats = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "seconds": 0.0}
         self.warnings = []
 
@@ -76,6 +81,7 @@ class FakeLLM:
         self.calls += 1
         self.stats["calls"] += 1
         self.modes.append(mode)
+        self.prompts.append(user)
         if "research questions that together" in user:
             return {"questions": ["What are sodium-ion batteries?", "How do they perform for grid storage?"]}
         if "web search queries" in user:
@@ -89,6 +95,25 @@ class FakeLLM:
                 {"claim": f"Source states: {first}", "quote": first},
                 {"claim": "A fabricated claim", "quote": "this sentence does not appear anywhere in the page"},
             ]}
+        if "planning the structure of a research report" in user:
+            if not self.outline:
+                return {"sections": [{"heading": "Nothing", "notes": ["N9999"]}]}
+            ids = re.findall(r"^N(\d+) ", user, re.M)
+            half = max(1, len(ids) // 2)
+            return {"sections": [
+                {"heading": "## How sodium-ion cells work", "notes": [f"N{i}" for i in ids[:half]]},
+                {"heading": "Costs and deployment", "notes": [int(i) for i in ids[half:]] + ["N424242"]},
+            ]}
+        if "Check each numbered statement" in user:
+            results = []
+            for num, statement in re.findall(r"^(\d+)\. (.*)$", user, re.M):
+                r = {"id": int(num), "verdict": "supported", "reason": ""}
+                if any(w in statement for w in self.unsupported):
+                    r.update(verdict="unsupported", reason="not in evidence")
+                elif self.wrong_source and self.wrong_source[0] in statement:
+                    r.update(verdict="wrong_source", sources=[f"S{self.wrong_source[1]}"])
+                results.append(r)
+            return {"results": results}
         if "Assess whether this is enough" in user:
             return {"sufficient": True, "reasoning": "Both questions are covered.", "follow_up_questions": []}
         raise AssertionError(f"unexpected JSON prompt: {user[:200]}")
@@ -98,6 +123,7 @@ class FakeLLM:
         self.stats["calls"] += 1
         self.modes.append(mode)
         user = messages[-1]["content"]
+        self.prompts.append(user)
         # Only cite ids from the notes / report body, not the "[S4]" example in the instructions.
         material = user.split("---")[1] if "executive summary" in user else user
         ids = re.findall(r"^\[S(\d+)\]", material, re.M) or re.findall(r"\[S(\d+)", material)

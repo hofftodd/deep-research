@@ -5,7 +5,9 @@ final report can only ever reference sources that were actually fetched and used
 
 * citations to unknown source ids are removed,
 * citations are renumbered [1], [2], ... in order of first appearance,
-* paragraphs without any citation are dropped (or flagged), and
+* paragraphs without any citation are dropped (or flagged),
+* text can be split into citation units (statement + its citation) so each one can be checked
+  against its sources and kept, re-cited or removed, and
 * the References section is generated from the database, never by the model.
 """
 
@@ -13,7 +15,9 @@ from __future__ import annotations
 
 import html
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Callable
 from urllib.parse import urlparse
 
 import markdown as md
@@ -114,19 +118,115 @@ def enforce_citations(text: str, policy: str = "drop") -> tuple[str, int]:
                 kept.append(item.rstrip() + " *[citation needed]*")
         if kept:
             out_blocks.append("\n".join(kept))
-    # Remove headings left with nothing beneath them.
-    cleaned = []
-    for i, block in enumerate(out_blocks):
-        if block.strip().startswith("#"):
-            nxt = out_blocks[i + 1] if i + 1 < len(out_blocks) else None
-            if nxt is None or nxt.strip().startswith("#") and _heading_level(nxt) <= _heading_level(block):
-                continue
-        cleaned.append(block)
-    return "\n\n".join(cleaned), uncited
+    return _join_blocks(out_blocks), uncited
 
 
 def _heading_level(block: str) -> int:
     return len(block.strip()) - len(block.strip().lstrip("#"))
+
+
+def _join_blocks(blocks: list[str]) -> str:
+    """Join blocks, removing headings left with nothing beneath them."""
+    cleaned = []
+    for i, block in enumerate(blocks):
+        if block.strip().startswith("#"):
+            nxt = blocks[i + 1] if i + 1 < len(blocks) else None
+            if nxt is None or nxt.strip().startswith("#") and _heading_level(nxt) <= _heading_level(block):
+                continue
+        cleaned.append(block)
+    return "\n\n".join(cleaned)
+
+
+# ---- citation units -------------------------------------------------------------------------
+# A unit is a run of text ending in a citation group, plus the punctuation right after it:
+# "A is true. B follows from it [S3]." is one unit citing S3. Uncited sentences before a citation
+# therefore belong to that citation's unit and get checked with it.
+
+_TRAIL_RE = re.compile(r"[.,;:!?)\]\"'\u201d\u2019]*")
+_LIST_PREFIX_RE = re.compile(r"\s*(?:[-*+]|\d+[.)])\s+")
+
+
+@dataclass
+class Unit:
+    id: int
+    text: str           # the original text of the unit, citation included
+    source_ids: list[int]
+    statement: str      # the text without citation tags
+
+
+def _segment_item(item: str) -> tuple[str, list[str], str]:
+    """Split one paragraph/list item into (list prefix, units, uncited tail)."""
+    m = _LIST_PREFIX_RE.match(item)
+    prefix = m.group(0) if m else ""
+    body = item[len(prefix):]
+    segs: list[str] = []
+    pos = 0
+    for c in CITE_RE.finditer(body):
+        end = c.end() + len(_TRAIL_RE.match(body, c.end()).group(0))
+        if segs and not body[pos:c.start()].strip():
+            segs[-1] += body[pos:end]  # adjacent groups like [S1][S2] belong to one statement
+        else:
+            segs.append(body[pos:end])
+        pos = end
+    return prefix, segs, body[pos:]
+
+
+def _parse_units(text: str) -> list[str | list[tuple[str, list[str], str]]]:
+    blocks: list[str | list[tuple[str, list[str], str]]] = []
+    text = re.sub(r"^(#{1,6}[ \t].*)$", r"\n\1\n", text.strip(), flags=re.MULTILINE)
+    for block in re.split(r"\n\s*\n", text.strip()):
+        if _is_structural(block) or block.lstrip().startswith("|"):
+            blocks.append(block.strip())  # headings, rules and tables are kept as they are
+        else:
+            blocks.append([_segment_item(item) for item in _split_items(block)])
+    return blocks
+
+
+def strip_citations(text: str) -> str:
+    return re.sub(r"\s+([.,;:!?])", r"\1", re.sub(r"\s{2,}", " ", CITE_RE.sub("", text))).strip()
+
+
+def citation_units(text: str) -> list[Unit]:
+    units: list[Unit] = []
+    for block in _parse_units(text):
+        if isinstance(block, str):
+            continue
+        for _, segs, _ in block:
+            for seg in segs:
+                units.append(Unit(len(units) + 1, seg, sorted(extract_source_ids(seg)), strip_citations(seg)))
+    return units
+
+
+def rewrite_units(text: str, fn: Callable[[Unit], str]) -> str:
+    """Rebuild *text* with each citation unit replaced by fn(unit); "" removes the unit.
+
+    Units are numbered exactly as citation_units() numbers them. Items, paragraphs and headings
+    left empty are removed."""
+    units = iter(citation_units(text))
+    out_blocks = []
+    for block in _parse_units(text):
+        if isinstance(block, str):
+            out_blocks.append(block)
+            continue
+        items = []
+        for prefix, segs, tail in block:
+            if not segs:
+                items.append(prefix + tail)
+                continue
+            kept = [r.strip() for r in (fn(next(units)) for _ in segs) if r and r.strip()]
+            if kept:
+                items.append(prefix + " ".join(kept) + tail.rstrip())
+        if items:
+            out_blocks.append("\n".join(items))
+    return _join_blocks(out_blocks)
+
+
+def recite(unit_text: str, source_ids: list[int]) -> str:
+    """Replace a unit's citation(s) with one citation of *source_ids*, before final punctuation."""
+    body = strip_citations(unit_text)
+    m = re.search(r"[.,;:!?]*$", body)
+    cite = "[" + ", ".join(f"S{i}" for i in source_ids) + "]"
+    return body[: m.start()].rstrip() + " " + cite + body[m.start():]
 
 
 def renumber(text: str, sources: dict[int, dict]) -> tuple[str, list[dict]]:

@@ -98,3 +98,31 @@ def test_safe_url():
     assert rpt.safe_url("#ref-3")
     for bad in ("javascript:x", "JAVASCRIPT:x", "javascript&amp;#58;x", "vbscript:x", "data:x", "/relative", "//evil.example"):
         assert rpt.safe_url(bad) is None, bad
+
+
+# ---- citation units ----------------------------------------------------------------------------
+def test_citation_units_group_preceding_sentences_and_adjacent_citations():
+    text = "## H\n\nSodium is common. It is cheap [S1]. Grid favours cost [S2][S3].\n\n| a | b [S1] |\n|---|---|"
+    units = rpt.citation_units(text)
+    assert [(u.statement, u.source_ids) for u in units] == [
+        ("Sodium is common. It is cheap.", [1]),
+        ("Grid favours cost.", [2, 3]),
+    ]  # the table is not split into units
+
+
+def test_rewrite_units_drops_recites_and_cleans_up():
+    text = "## H\n\nKeep this [S1]. Drop this [S2].\n\n- dropped item [S3]\n- kept item [S4]\n\n## Empty\n\nGone [S5]."
+
+    def fn(u):
+        if "Drop" in u.text or "dropped" in u.text or "Gone" in u.text:
+            return ""
+        if "kept item" in u.text:
+            return rpt.recite(u.text, [7, 8])
+        return u.text
+
+    assert rpt.rewrite_units(text, fn) == "## H\n\nKeep this [S1].\n\n- kept item [S7, S8]"
+
+
+def test_recite_keeps_final_punctuation():
+    assert rpt.recite("It rose 5% in 2024 [S1][S2].", [3]) == "It rose 5% in 2024 [S3]."
+    assert rpt.recite("No punctuation [S1]", [2]) == "No punctuation [S2]"
