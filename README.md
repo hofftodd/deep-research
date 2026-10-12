@@ -22,7 +22,7 @@ Requires Python 3.10+.
 ```bash
 # 1. A local model. Example with Ollama (https://ollama.com):
 ollama pull qwen3:8b
-OLLAMA_CONTEXT_LENGTH=16384 ollama serve     # a larger context window helps a lot
+OLLAMA_CONTEXT_LENGTH=16384 ollama serve     # Ollama's default context is too small; see below
 
 # 2. The app
 python -m venv .venv && source .venv/bin/activate
@@ -47,10 +47,48 @@ override research depth under **Model and depth**.
 
 Research quality depends heavily on the model. It must follow instructions and produce JSON
 reliably. 7–14B instruction-tuned models (Qwen3 8B/14B, Llama 3.1 8B, Gemma 3 12B, Mistral
-Small) work; bigger ones write noticeably better reports. Reasoning models are fine because
-`<think>` blocks are stripped. `LLM_CONTEXT_CHARS` caps how much text goes into one call; budget
-about 3 characters per token of context and leave room for the reply. The default 12000 suits an
-8k-token context or larger; raise it (e.g. 30000 with a 16k context) to read more of each page.
+Small) work; bigger ones write noticeably better reports.
+
+**Context window.** `LLM_CONTEXT_CHARS` (default 24000) caps how much text goes into one call.
+The server's context window must hold that (about 3.5 characters per token) *plus* the reply,
+including any thinking. If it doesn't, Ollama silently drops the start of the prompt, which
+includes the instructions. The app warns in the activity log when it detects this. Rule of
+thumb: context tokens ≥ `LLM_CONTEXT_CHARS / 3.5 + LLM_MAX_TOKENS_DEEP`.
+
+**Thinking models.** Every model call is either *fast* (writing search queries, ranking results,
+extracting notes: mechanical, run with thinking off) or *deep* (planning, reviewing coverage,
+writing: thinking at `low` by default). Long thinking on every call is the main reason a run
+takes hours instead of minutes. Thinking is requested two ways by default
+(`LLM_THINK_CONTROL=both`): `chat_template_kwargs.enable_thinking`, honoured by vLLM, SGLang
+and llama.cpp's `llama-server` (started with `--jinja`), and `reasoning_effort`. If the activity
+log says *"The model is still thinking although thinking was turned off"*, your server ignores
+both. Try `LLM_THINK_CONTROL=reasoning_effort`, or use one of the servers above. If a server
+rejects these fields, the app drops them and carries on (and logs that it did).
+
+### Recommended setup for Qwen 3.8 27B
+
+Qwen 3.8 27B (dense, 262K context, ~17 GB at Q4_K_M) is a strong choice, but it thinks at
+maximum effort by default, which is very slow at the 15–30 tokens/s typical of local hardware.
+Use the Qwen preset, which applies the model card's sampling settings, and give it a real context
+window. For example, with llama.cpp:
+
+```bash
+llama-server -m qwen3.8-27b-q4_k_m.gguf --jinja --ctx-size 32768 --port 8080
+```
+
+```ini
+# .env
+LLM_BASE_URL=http://localhost:8080/v1
+LLM_MODEL=qwen3.8-27b          # whatever name your server reports (shown in the UI)
+LLM_PRESET=qwen
+LLM_CONTEXT_CHARS=60000        # whole pages fit in one call (MAX_PAGE_CHARS is 40000)
+LLM_THINK_FAST=off
+LLM_THINK_DEEP=low             # try medium for better plans/writing if you can wait
+```
+
+32K tokens of context covers 60000 characters (~17K tokens) plus the 8192-token deep output cap.
+With Ollama, set `OLLAMA_CONTEXT_LENGTH=32768` instead. The *Model usage* line at the end of
+each run's activity log shows calls, tokens and model time, so you can tune from real numbers.
 
 ## How it works
 
@@ -81,6 +119,8 @@ write one section per question from its notes ─► executive summary ─► ci
      (or marked *[citation needed]* with `UNCITED_POLICY=flag`), and the removal is logged in the activity feed;
    - citations are renumbered `[1]`, `[2]`… by first appearance;
    - the **References** list (title, site, URL, access date) is generated from the database, never by the model.
+4. **Safe rendering.** Model-written text is untrusted, since web pages can try to inject instructions.
+   Raw HTML is escaped, images are removed, and only `http(s)` links survive in the rendered report.
 
 The final report also states which model produced it and lists any research questions that
 could not be answered.
@@ -96,7 +136,14 @@ All settings are environment variables (or `.env`); see [`.env.example`](.env.ex
 |---|---|---|
 | `LLM_BASE_URL` | `http://localhost:11434/v1` | OpenAI-compatible endpoint |
 | `LLM_MODEL` | `qwen3:8b` | Default model (selectable per topic) |
-| `LLM_CONTEXT_CHARS` | `12000` | Text budget per model call |
+| `LLM_CONTEXT_CHARS` | `24000` | Text budget per model call (see *Context window*) |
+| `LLM_PRESET` | `generic` | Sampling settings: `generic` or `qwen` (Qwen model-card values) |
+| `LLM_THINK_FAST` / `LLM_THINK_DEEP` | `off` / `low` | Thinking per call type: `off`, `low`, `medium`, `high`, `xhigh`, `default` (send nothing) |
+| `LLM_THINK_CONTROL` | `both` | How thinking is requested: `both`, `chat_template_kwargs`, `reasoning_effort`, `none` |
+| `LLM_MAX_TOKENS_FAST` / `_DEEP` | `4096` / `8192` | Output cap per call, thinking included |
+| `LLM_SAMPLING_FAST` / `_DEEP` | – | JSON overrides, e.g. `{"temperature": 0.5}` |
+| `LLM_TIMEOUT` | `900` | Seconds per model call |
+| `LLM_MAX_CONSECUTIVE_FAILURES` | `3` | Stop a run after this many failed calls in a row |
 | `SEARCH_PROVIDER` | `duckduckgo` | `searxng`, `duckduckgo` or `brave` |
 | `MAX_ITERATIONS` | `3` | Research rounds (plan + follow-ups) |
 | `MAX_QUESTIONS` | `5` | Initial questions / follow-ups per round |
@@ -131,8 +178,10 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-Tests use a fake model, search engine and web (`tests/fakes.py`), so they run offline and
-exercise the full pipeline, including citation enforcement and quote verification.
+Tests run offline. The pipeline tests use a fake model, search engine and web
+(`tests/fakes.py`). The model client, search providers and fetcher are tested against faked HTTP
+responses (`httpx.MockTransport`), covering retries, fallbacks and error handling. Check coverage
+with `pip install pytest-cov && pytest --cov=deep_research --cov-branch`.
 
 Project layout:
 
@@ -147,6 +196,11 @@ deep_research/
   db.py       SQLite storage
   static/     index.html, app.js, styles.css
 ```
+
+A failed model call (timeout, server error, unusable output) costs only that step. The page,
+section or review is skipped with a warning in the activity log, and the run continues. A run
+stops only when `LLM_MAX_CONSECUTIVE_FAILURES` calls fail in a row, which usually means the model
+server is down.
 
 Limitations: PDFs and JavaScript-only pages are skipped; a run interrupted by a server restart is
 marked failed and can be retried from scratch.

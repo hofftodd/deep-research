@@ -168,10 +168,46 @@ def references_markdown(refs: list[dict]) -> str:
     return "\n".join(lines)
 
 
+_LINK_RE = re.compile(r'<a href="([^"]*)"([^>]*)>(.*?)</a>', re.DOTALL)
+_IMG_RE = re.compile(r"<img\b[^>]*>")
+_CTRL_RE = re.compile(r"[\x00-\x20\x7f]+")
+
+
+def safe_url(url: str) -> str | None:
+    """Return the URL if it is an http(s) link or an in-page anchor, else None.
+
+    Entities are decoded first (repeatedly) because browsers decode them in attributes, so
+    `javascript&#58;...` must be caught too.
+    """
+    prev, cur = None, url
+    while prev != cur:
+        prev, cur = cur, html.unescape(cur)
+    cur = _CTRL_RE.sub("", cur).lower()
+    if cur.startswith(("http://", "https://")) or re.fullmatch(r"#[\w-]+", cur):
+        return url
+    return None
+
+
+def _sanitize_links(body: str) -> str:
+    """Model-written text can carry Markdown links (possibly planted by a web page via prompt
+    injection). Keep only http(s) links, opened in a new tab; reduce anything else to its text."""
+
+    def repl(m: re.Match) -> str:
+        href, text = m.group(1), m.group(3)
+        if safe_url(href) is None:
+            return text
+        if href.startswith("#"):
+            return f'<a href="{href}">{text}</a>'
+        return f'<a href="{href}" target="_blank" rel="noopener noreferrer nofollow">{text}</a>'
+
+    return _IMG_RE.sub("", _LINK_RE.sub(repl, body))
+
+
 def render_html(body_md: str, refs: list[dict]) -> str:
-    """Render the report body (model-written, so raw HTML is escaped) plus linked references."""
+    """Render the report body (model-written, so raw HTML is escaped and links are sanitized)
+    plus linked references."""
     safe = body_md.replace("&", "&amp;").replace("<", "&lt;")
-    body = md.markdown(safe, extensions=["tables", "sane_lists"])
+    body = _sanitize_links(md.markdown(safe, extensions=["tables", "sane_lists"]))
 
     def link(m: re.Match) -> str:
         parts = [p.strip() for p in m.group(1).split(",")]
@@ -183,8 +219,10 @@ def render_html(body_md: str, refs: list[dict]) -> str:
     if not refs:
         return body
     items = "".join(
-        f'<li id="ref-{r["n"]}" value="{r["n"]}"><a href="{html.escape(r["url"])}" target="_blank" rel="noopener noreferrer">'
-        f'{html.escape(r["title"])}</a> <span class="ref-meta">— {html.escape(r["site"])}, accessed {r["accessed"]}</span></li>'
+        f'<li id="ref-{r["n"]}" value="{r["n"]}">'
+        + (f'<a href="{html.escape(r["url"])}" target="_blank" rel="noopener noreferrer">{html.escape(r["title"])}</a>'
+           if safe_url(r["url"]) else html.escape(r["title"]))
+        + f' <span class="ref-meta">— {html.escape(r["site"])}, accessed {r["accessed"]}</span></li>'
         for r in refs
     )
     return body + f'<h2>References</h2><ol class="references">{items}</ol>'

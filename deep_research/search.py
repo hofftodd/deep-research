@@ -53,12 +53,13 @@ def is_fetchable(url: str) -> bool:
 
 
 class Searcher:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, transport: httpx.BaseTransport | None = None):
         self.s = settings
         self._http = httpx.Client(
             timeout=settings.fetch_timeout,
             headers={"User-Agent": settings.user_agent, "Accept-Language": "en-US,en;q=0.9"},
             follow_redirects=True,
+            transport=transport,
         )
 
     def search(self, query: str, limit: int | None = None) -> list[SearchResult]:
@@ -196,13 +197,14 @@ def extract_text(html: str) -> tuple[str, str]:
 
 
 class Fetcher:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, transport: httpx.BaseTransport | None = None):
         self.s = settings
         self._http = httpx.Client(
             timeout=settings.fetch_timeout,
             headers={"User-Agent": settings.user_agent, "Accept-Language": "en-US,en;q=0.9",
                      "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5"},
             follow_redirects=True,
+            transport=transport,
         )
 
     def fetch(self, url: str) -> Page:

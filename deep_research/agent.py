@@ -25,6 +25,12 @@ class Cancelled(Exception):
     pass
 
 
+class ModelUnavailable(RuntimeError):
+    """Too many model calls failed in a row; the run cannot usefully continue.
+
+    Deliberately not an LLMError, so the per-step fallbacks don't swallow it."""
+
+
 @dataclass
 class Options:
     max_iterations: int
@@ -113,6 +119,7 @@ class ResearchAgent:
         self.opts = Options.resolve(settings, topic["options"])
         self.system = SYSTEM.format(today=date.today().isoformat())
         self._read_pairs: set[tuple[int, int]] = set()  # (source_id, question_id) already mined
+        self._failures = 0  # consecutive failed model calls
 
     # ---- helpers ------------------------------------------------------------------------
     def log(self, message: str, level: str = "info") -> None:
@@ -137,13 +144,39 @@ class ResearchAgent:
         t = self.topic
         return t["title"] + (f"\n\nAdditional guidance from the requester:\n{t['description']}" if t["description"].strip() else "")
 
-    def ask_json(self, prompt: str) -> Any:
+    def _call(self, fn: Callable[[], Any]) -> Any:
+        """Run one model call. A failure raises LLMError for the caller to fall back on, unless
+        too many calls have now failed in a row, which raises ModelUnavailable to end the run."""
         self.check_cancel()
-        return self.llm.chat_json(self.system, prompt)
+        try:
+            result = fn()
+        except LLMError as exc:
+            self._failures += 1
+            self._flush_llm_warnings()
+            if self._failures >= self.s.llm_max_consecutive_failures:
+                raise ModelUnavailable(f"Stopped after {self._failures} model calls failed in a row. "
+                                       f"Last error: {exc}") from exc
+            raise
+        self._failures = 0
+        self._flush_llm_warnings()
+        return result
 
-    def ask_text(self, prompt: str) -> str:
-        self.check_cancel()
-        return self.llm.chat([{"role": "system", "content": self.system}, {"role": "user", "content": prompt}])
+    def _flush_llm_warnings(self) -> None:
+        for w in self.llm.pop_warnings():
+            self.log(w, "warning")
+
+    def ask_json(self, prompt: str, mode: str = "fast") -> Any:
+        return self._call(lambda: self.llm.chat_json(self.system, prompt, mode=mode))
+
+    def ask_text(self, prompt: str, mode: str = "deep") -> str:
+        messages = [{"role": "system", "content": self.system}, {"role": "user", "content": prompt}]
+        return self._call(lambda: self.llm.chat(messages, mode=mode))
+
+    def _log_usage(self) -> None:
+        st = self.llm.stats
+        if st["calls"]:
+            self.log(f"Model usage: {st['calls']} call(s), {st['prompt_tokens']:,} prompt + "
+                     f"{st['completion_tokens']:,} output tokens, {st['seconds'] / 60:.1f} min of model time.")
 
     # ---- pipeline -----------------------------------------------------------------------
     def run(self) -> None:
@@ -157,6 +190,7 @@ class ResearchAgent:
                 if done:
                     break
             self.write_report()
+            self._log_usage()
         except Cancelled:
             self.set_state(status="cancelled", phase="Cancelled by user")
             self.log("Research cancelled.", "warning")
@@ -164,21 +198,28 @@ class ResearchAgent:
             self.set_state(status="failed", phase="Failed")
             self.db.update_topic(self.topic_id, error=str(exc))
             self.log(f"Research failed: {exc}", "error")
+            self._log_usage()
             raise
 
     def plan(self) -> None:
         self.set_state(status="planning", phase="Breaking the topic into research questions", progress=2)
-        data = self.ask_json(
-            f"Research topic:\n{self.subject}\n\n"
-            f"Break this topic into {self.opts.max_questions} or fewer focused, non-overlapping research "
-            "questions that together would let someone write a thorough, balanced report. Cover background, "
-            "key facts and figures, competing viewpoints, and recent developments where relevant.\n\n"
-            'Return JSON: {"questions": ["...", "..."]}'
-        )
+        try:
+            data = self.ask_json(
+                f"Research topic:\n{self.subject}\n\n"
+                f"Break this topic into {self.opts.max_questions} or fewer focused, non-overlapping research "
+                "questions that together would let someone write a thorough, balanced report. Cover background, "
+                "key facts and figures, competing viewpoints, and recent developments where relevant.\n\n"
+                'Return JSON: {"questions": ["...", "..."]}',
+                mode="deep",
+            )
+        except LLMError as exc:
+            data, reason = {}, f"Planning failed ({exc})"
+        else:
+            reason = "Model returned no plan"
         questions = _clean_list(data.get("questions") if isinstance(data, dict) else data, self.opts.max_questions)
         if not questions:
             questions = [self.topic["title"]]
-            self.log("Model returned no plan; researching the topic as a single question.", "warning")
+            self.log(f"{reason}; researching the topic as a single question.", "warning")
         for q in questions:
             self.db.add_question(self.topic_id, q, iteration=1)
         self.log("Research plan:\n" + "\n".join(f"• {q}" for q in questions))
@@ -207,14 +248,18 @@ class ResearchAgent:
     def research_question(self, q: dict, iteration: int) -> None:
         self.log(f"Researching: {q['text']}")
         prior = [n["claim"] for n in self.db.notes(self.topic_id, q["id"])][:10]
-        data = self.ask_json(
-            f"Overall topic: {self.topic['title']}\nResearch question: {q['text']}\n"
-            + (f"Queries already tried: {q['queries']}\n" if q["queries"] else "")
-            + (f"Already known: {prior}\n" if prior else "")
-            + f"\nWrite {self.opts.queries_per_question} diverse web search queries (short, keyword-style, "
-            'like a human would type into a search engine) to find authoritative sources.\n'
-            'Return JSON: {"queries": ["...", "..."]}'
-        )
+        try:
+            data = self.ask_json(
+                f"Overall topic: {self.topic['title']}\nResearch question: {q['text']}\n"
+                + (f"Queries already tried: {q['queries']}\n" if q["queries"] else "")
+                + (f"Already known: {prior}\n" if prior else "")
+                + f"\nWrite {self.opts.queries_per_question} diverse web search queries (short, keyword-style, "
+                'like a human would type into a search engine) to find authoritative sources.\n'
+                'Return JSON: {"queries": ["...", "..."]}'
+            )
+        except LLMError as exc:
+            self.log(f"Could not generate search queries ({exc}); searching for the question itself.", "warning")
+            data = {}
         queries = _clean_list(data.get("queries") if isinstance(data, dict) else data, self.opts.queries_per_question)
         if not queries:
             queries = [q["text"]]
@@ -309,16 +354,20 @@ class ResearchAgent:
         chunks = chunk_text(text, chunk_size, max_chunks=3)
         norm_page = _norm_text(text)
         saved = rejected = 0
-        for chunk in chunks:
-            data = self.ask_json(
-                f"Research question: {q['text']}\n(Overall topic: {self.topic['title']})\n\n"
-                f"Source: {title} ({url})\n---BEGIN SOURCE TEXT---\n{chunk}\n---END SOURCE TEXT---\n\n"
-                "Extract the facts from this source text that help answer the research question. Each note must "
-                "be a self-contained factual statement (include numbers, dates, names and context), and must be "
-                "accompanied by a short verbatim quote copied exactly from the source text that supports it. "
-                "Do not use outside knowledge. If the text is irrelevant, return an empty list.\n"
-                'Return JSON: {"notes": [{"claim": "...", "quote": "exact words from the text"}]}'
-            )
+        for part, chunk in enumerate(chunks, 1):
+            try:
+                data = self.ask_json(
+                    f"Research question: {q['text']}\n(Overall topic: {self.topic['title']})\n\n"
+                    f"Source: {title} ({url})\n---BEGIN SOURCE TEXT---\n{chunk}\n---END SOURCE TEXT---\n\n"
+                    "Extract the facts from this source text that help answer the research question. Each note must "
+                    "be a self-contained factual statement (include numbers, dates, names and context), and must be "
+                    "accompanied by a short verbatim quote copied exactly from the source text that supports it. "
+                    "Do not use outside knowledge. If the text is irrelevant, return an empty list.\n"
+                    'Return JSON: {"notes": [{"claim": "...", "quote": "exact words from the text"}]}'
+                )
+            except LLMError as exc:
+                self.log(f"Could not extract notes from part {part}/{len(chunks)} of {title or url}: {exc}", "warning")
+                continue
             notes = data.get("notes", []) if isinstance(data, dict) else data
             if not isinstance(notes, list):
                 continue
@@ -356,13 +405,18 @@ class ResearchAgent:
             summary.append(f"Q: {q['text']} ({len(claims)} notes)\n" + "\n".join(f"  - {c[:200]}" for c in claims[:8]))
         digest = "\n".join(summary)[: self.s.llm_context_chars - 2000]
         remaining = self.opts.max_questions
-        data = self.ask_json(
-            f"Research topic:\n{self.subject}\n\nWhat has been found so far:\n{digest}\n\n"
-            "Assess whether this is enough to write a thorough, well-sourced report. If important aspects are "
-            f"missing, thin, or contradictory, list up to {remaining} new follow-up research questions that "
-            "fill those gaps (do not repeat existing questions).\n"
-            'Return JSON: {"sufficient": true|false, "reasoning": "...", "follow_up_questions": ["..."]}'
-        )
+        try:
+            data = self.ask_json(
+                f"Research topic:\n{self.subject}\n\nWhat has been found so far:\n{digest}\n\n"
+                "Assess whether this is enough to write a thorough, well-sourced report. If important aspects are "
+                f"missing, thin, or contradictory, list up to {remaining} new follow-up research questions that "
+                "fill those gaps (do not repeat existing questions).\n"
+                'Return JSON: {"sufficient": true|false, "reasoning": "...", "follow_up_questions": ["..."]}',
+                mode="deep",
+            )
+        except LLMError as exc:
+            self.log(f"Coverage review failed ({exc}); writing the report from what was found.", "warning")
+            return True
         if not isinstance(data, dict):
             return True
         reasoning = str(data.get("reasoning", "")).strip()
@@ -456,13 +510,16 @@ class ResearchAgent:
             "- Where sources disagree, say so and cite both.\n"
             "Output only the section."
         )
-        text = self.ask_text(prompt)
-        text = self._finalize_section(text, q, valid_ids)
-        if text is None:
-            self.log(f"Section for '{q['text']}' had no valid citations; retrying once.", "warning")
-            text = self._finalize_section(self.ask_text(
-                prompt + "\n\nIMPORTANT: your previous attempt omitted the [S#] source tags. Every factual "
-                "sentence MUST end with one."), q, valid_ids)
+        try:
+            text = self._finalize_section(self.ask_text(prompt), q, valid_ids)
+            if text is None:
+                self.log(f"Section for '{q['text']}' had no valid citations; retrying once.", "warning")
+                text = self._finalize_section(self.ask_text(
+                    prompt + "\n\nIMPORTANT: your previous attempt omitted the [S#] source tags. Every factual "
+                    "sentence MUST end with one."), q, valid_ids)
+        except LLMError as exc:
+            self.log(f"Could not write the section for '{q['text']}': {exc}", "warning")
+            return ""
         return text or ""
 
     def _finalize_section(self, text: str, q: dict, valid_ids: set[int]) -> str | None:
@@ -488,12 +545,16 @@ class ResearchAgent:
         return text if rpt.extract_source_ids(text) else None
 
     def write_summary(self, body: str, valid_ids: set[int]) -> str:
-        text = self.ask_text(
-            f"Below is the body of a research report on: {self.subject}\n\n---\n{body[: self.s.llm_context_chars - 2000]}\n---\n\n"
-            "Write an executive summary of 1-3 short paragraphs (or a short bullet list of key findings) that "
-            "directly answers the topic. Use ONLY facts stated in the report body and keep their source tags "
-            "(e.g. [S4]) at the end of each sentence. Do not add a heading. Output only the summary."
-        )
+        try:
+            text = self.ask_text(
+                f"Below is the body of a research report on: {self.subject}\n\n---\n{body[: self.s.llm_context_chars - 2000]}\n---\n\n"
+                "Write an executive summary of 1-3 short paragraphs (or a short bullet list of key findings) that "
+                "directly answers the topic. Use ONLY facts stated in the report body and keep their source tags "
+                "(e.g. [S4]) at the end of each sentence. Do not add a heading. Output only the summary."
+            )
+        except LLMError as exc:
+            self.log(f"Could not write the summary: {exc}", "warning")
+            return ""
         text = rpt.drop_invalid_citations(text.strip(), valid_ids)
         text, _ = rpt.enforce_citations(text, "drop")
         return text

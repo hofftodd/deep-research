@@ -35,7 +35,8 @@ def create_app(settings: Settings | None = None, worker: Worker | None = None,
     settings = settings or Settings.from_env()
     db = db or Database(settings.db_path)
     llm = llm or LLMClient(settings.llm_base_url, settings.llm_model, settings.llm_api_key,
-                           settings.llm_timeout, settings.llm_temperature)
+                           settings.llm_timeout, profiles=settings.call_profiles(),
+                           think_control=settings.llm_think_control)
     worker = worker or Worker(db, settings, llm)
 
     @asynccontextmanager
@@ -59,6 +60,8 @@ def create_app(settings: Settings | None = None, worker: Worker | None = None,
             "model": settings.llm_model,
             "llm_base_url": settings.llm_base_url,
             "search_provider": settings.search_provider,
+            "preset": settings.llm_preset,
+            "thinking": {"fast": settings.llm_think_fast, "deep": settings.llm_think_deep},
             "llm_ok": False,
             "models": [],
             "defaults": {

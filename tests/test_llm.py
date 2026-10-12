@@ -14,3 +14,8 @@ def test_parse_json_variants():
     assert parse_json('<think>{"no": 1}</think>Here: {"a": 2} hope that helps') == {"a": 2}
     with pytest.raises(LLMError):
         parse_json("no json here")
+
+
+def test_strip_reasoning_drops_unfinished_thinking():
+    assert strip_reasoning("<think>still going and then cut off") == ""
+    assert strip_reasoning("Answer first <think>then rambling") == "Answer first"

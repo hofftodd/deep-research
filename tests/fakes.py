@@ -57,6 +57,13 @@ class FakeLLM:
         self.cite_bogus = cite_bogus
         self.uncited_paragraph = uncited_paragraph
         self.calls = 0
+        self.modes = []
+        self.stats = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "seconds": 0.0}
+        self.warnings = []
+
+    def pop_warnings(self):
+        out, self.warnings = self.warnings, []
+        return out
 
     def with_model(self, model):
         self.model = model
@@ -65,8 +72,10 @@ class FakeLLM:
     def list_models(self):
         return ["fake-model", "other-model"]
 
-    def chat_json(self, system, user, retries=2):
+    def chat_json(self, system, user, mode="fast", retries=2):
         self.calls += 1
+        self.stats["calls"] += 1
+        self.modes.append(mode)
         if "research questions that together" in user:
             return {"questions": ["What are sodium-ion batteries?", "How do they perform for grid storage?"]}
         if "web search queries" in user:
@@ -84,8 +93,10 @@ class FakeLLM:
             return {"sufficient": True, "reasoning": "Both questions are covered.", "follow_up_questions": []}
         raise AssertionError(f"unexpected JSON prompt: {user[:200]}")
 
-    def chat(self, messages, **_):
+    def chat(self, messages, json_mode=False, mode="fast"):
         self.calls += 1
+        self.stats["calls"] += 1
+        self.modes.append(mode)
         user = messages[-1]["content"]
         # Only cite ids from the notes / report body, not the "[S4]" example in the instructions.
         material = user.split("---")[1] if "executive summary" in user else user

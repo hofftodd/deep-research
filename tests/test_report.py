@@ -69,3 +69,32 @@ def test_tables_are_not_trimmed():
     table = "| a | b |\n|---|---|\n| x [S1] | y |"
     out, n = rpt.enforce_citations(table, "drop")
     assert out == table and n == 0
+
+
+def test_render_html_neutralises_dangerous_links_and_images():
+    body = (
+        "A [js](javascript:alert(1)) link [1]. "
+        "An [encoded](javascript&#58;alert(1)) one. "
+        "A [spaced]( java\tscript:alert(1)) one. "
+        "A [data](data:text/html,<b>x</b>) one. "
+        "An image ![x](https://evil.example/x.png). "
+        "A [good](https://ok.example/page) link."
+    )
+    out = rpt.render_html(body, [])
+    assert "javascript" not in out.lower() and "data:" not in out and "<img" not in out
+    assert 'href="https://ok.example/page" target="_blank" rel="noopener noreferrer nofollow"' in out
+    assert "js" in out and "encoded" in out  # link text survives as plain text
+    assert 'href="#ref-1"' in out
+
+
+def test_reference_with_unsafe_url_is_not_linked():
+    refs = [{"n": 1, "url": "javascript:alert(1)", "title": "T", "site": "x", "accessed": "2026-01-01"}]
+    out = rpt.render_html("Claim [1].", refs)
+    assert "javascript" not in out and 'id="ref-1"' in out
+
+
+def test_safe_url():
+    assert rpt.safe_url("https://a.example/x?y=1&amp;z=2")
+    assert rpt.safe_url("#ref-3")
+    for bad in ("javascript:x", "JAVASCRIPT:x", "javascript&amp;#58;x", "vbscript:x", "data:x", "/relative", "//evil.example"):
+        assert rpt.safe_url(bad) is None, bad
