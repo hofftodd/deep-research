@@ -1,0 +1,71 @@
+from deep_research import report as rpt
+
+
+def test_drop_invalid_citations_keeps_only_known_ids():
+    text = "Fact one [S1]. Fact two [S2, S99]. Fact three [S42]."
+    out = rpt.drop_invalid_citations(text, {1, 2})
+    assert out == "Fact one [S1]. Fact two [S2]. Fact three."
+
+
+def test_citation_variants_are_recognised():
+    assert rpt.extract_source_ids("a [S1] b [s2; S3] c [4] d [5,6]") == {1, 2, 3, 4, 5, 6}
+
+
+def test_enforce_citations_drops_uncited_paragraphs_and_list_items():
+    text = "## Heading\n\nCited paragraph [S1].\n\nUncited paragraph.\n\n- item one [S2]\n- item two"
+    out, n = rpt.enforce_citations(text, "drop")
+    assert n == 2
+    assert "Uncited" not in out and "item two" not in out
+    assert "Cited paragraph [S1]." in out and "- item one [S2]" in out
+
+
+def test_enforce_citations_flag_policy():
+    out, n = rpt.enforce_citations("No source here.", "flag")
+    assert n == 1 and "[citation needed]" in out
+
+
+def test_enforce_citations_removes_empty_headings():
+    out, _ = rpt.enforce_citations("## Empty\n\nNothing cited.\n\n## Kept\n\nCited [S1].", "drop")
+    assert "Empty" not in out and "## Kept" in out
+
+
+def test_renumber_by_first_appearance_and_build_refs():
+    sources = {
+        7: {"url": "https://a.example/x", "title": "A", "fetched_at": "2026-01-02T00:00:00"},
+        3: {"url": "https://www.b.example/y", "title": "", "fetched_at": "2026-01-03T00:00:00"},
+    }
+    text, refs = rpt.renumber("First [S7]. Second [S3, S7]. Third [S3].", sources)
+    assert text == "First [1]. Second [1, 2]. Third [2]."
+    assert [r["source_id"] for r in refs] == [7, 3]
+    assert refs[1]["title"] == "www.b.example" and refs[1]["site"] == "b.example"
+    md = rpt.references_markdown(refs)
+    assert "1. [A](https://a.example/x)" in md
+
+
+def test_render_html_escapes_model_html_and_links_citations():
+    refs = [{"n": 1, "url": "https://a.example/?q=<x>", "title": "A <b>", "site": "a.example", "accessed": "2026-01-01"}]
+    out = rpt.render_html("Claim <script>alert(1)</script> [1].", refs)
+    assert "<script>" not in out
+    assert 'href="#ref-1"' in out and 'id="ref-1"' in out
+    assert "A &lt;b&gt;" in out
+
+
+def test_trailing_uncited_sentence_is_removed():
+    out, n = rpt.enforce_citations("Abundant [S1]. Costs may undercut LFP cells soon.", "drop")
+    assert n == 1 and out == "Abundant [S1]."
+
+
+def test_sentences_before_a_citation_are_kept():
+    text = "Sodium is common. It is cheap to mine [S1]."
+    assert rpt.enforce_citations(text, "drop") == (text, 0)
+
+
+def test_text_directly_under_heading_is_checked():
+    out, n = rpt.enforce_citations("## Heading\nUncited claim right under the heading.\n\nCited [S1].", "drop")
+    assert n == 1 and "Uncited" not in out and out.startswith("## Heading\n\nCited")
+
+
+def test_tables_are_not_trimmed():
+    table = "| a | b |\n|---|---|\n| x [S1] | y |"
+    out, n = rpt.enforce_citations(table, "drop")
+    assert out == table and n == 0

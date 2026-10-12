@@ -1,0 +1,11 @@
+# Minimal SearXNG config for Deep Research: enables the JSON API the agent uses.
+use_default_settings: true
+server:
+  secret_key: "change-me-to-a-random-string"
+  limiter: false
+  image_proxy: false
+search:
+  safe_search: 0
+  formats:
+    - html
+    - json

@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Deep Research</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 16 16%27%3E%3Ccircle cx=%276.5%27 cy=%276.5%27 r=%274.5%27 fill=%27none%27 stroke=%27%232f5bd3%27 stroke-width=%272%27/%3E%3Cpath d=%27M10 10l4.5 4.5%27 stroke=%27%232f5bd3%27 stroke-width=%272%27/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#/">Deep Research</a>
+    <div id="health" class="health" title="Model server status">
+      <span class="dot"></span><span class="health-text">Checking model…</span>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <a class="btn primary block" href="#/new">+ New research</a>
+      <div class="sidebar-head">Topics</div>
+      <ul id="topic-list" class="topic-list"></ul>
+      <p id="topic-empty" class="muted small hidden">No research yet.</p>
+    </aside>
+
+    <main id="main" class="main"></main>
+  </div>
+
+  <template id="tpl-new">
+    <section class="panel narrow">
+      <h1>New research topic</h1>
+      <p class="muted">Describe what you want researched. The agent breaks it into questions, searches the
+        web, reads sources with your local model, and writes a report where every statement cites its source.</p>
+      <form id="new-form" class="form">
+        <label>Topic or question
+          <input name="title" required minlength="3" maxlength="500"
+                 placeholder="e.g. How do sodium-ion batteries compare to lithium-ion for grid storage?">
+        </label>
+        <label>Guidance <span class="muted">(optional)</span>
+          <textarea name="description" rows="4" maxlength="5000"
+                    placeholder="Audience, angles to cover or avoid, time period, regions, preferred kinds of sources…"></textarea>
+        </label>
+        <details class="advanced">
+          <summary>Model and depth</summary>
+          <div class="grid">
+            <label>Model
+              <select name="model"></select>
+            </label>
+            <label>Research rounds
+              <input name="max_iterations" type="number" min="1" max="10">
+            </label>
+            <label>Initial questions
+              <input name="max_questions" type="number" min="1" max="12">
+            </label>
+            <label>Max sources
+              <input name="max_sources" type="number" min="1" max="100">
+            </label>
+            <label>Sources per question
+              <input name="sources_per_question" type="number" min="1" max="10">
+            </label>
+          </div>
+        </details>
+        <p id="new-error" class="error hidden"></p>
+        <button class="btn primary" type="submit">Start research</button>
+      </form>
+    </section>
+  </template>
+
+  <template id="tpl-topic">
+    <section class="panel">
+      <div class="topic-head">
+        <div class="topic-title-wrap">
+          <h1 class="topic-title"></h1>
+          <p class="topic-desc muted"></p>
+        </div>
+        <div class="actions">
+          <a class="btn act-download hidden" download>Download .md</a>
+          <button class="btn act-cancel hidden" type="button">Cancel</button>
+          <button class="btn act-retry hidden" type="button">Retry</button>
+          <button class="btn danger act-delete" type="button">Delete</button>
+        </div>
+      </div>
+
+      <div class="status-card">
+        <div class="status-row">
+          <span class="badge"></span>
+          <span class="phase"></span>
+        </div>
+        <div class="progress"><div class="bar"></div></div>
+        <div class="stats muted small"></div>
+        <p class="topic-error error hidden"></p>
+      </div>
+
+      <nav class="tabs" role="tablist">
+        <button type="button" data-tab="report">Report</button>
+        <button type="button" data-tab="activity">Activity</button>
+        <button type="button" data-tab="plan">Plan</button>
+        <button type="button" data-tab="sources">Sources</button>
+      </nav>
+
+      <div class="tab-body" data-body="report"><article class="report"></article></div>
+      <div class="tab-body" data-body="activity"><ol class="events"></ol></div>
+      <div class="tab-body" data-body="plan"><ol class="questions"></ol></div>
+      <div class="tab-body" data-body="sources"><table class="sources"><thead>
+        <tr><th>Source</th><th>Status</th><th class="num">Notes</th></tr></thead><tbody></tbody></table></div>
+    </section>
+  </template>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
