@@ -8,6 +8,11 @@ knows enough, and writes a human-readable report in which **every statement cite
 
 *The dashboard during a research run (demo data).*
 
+<a href="docs/report.png"><img src="docs/report.png" width="640" alt="A finished report: summary, themed sections with numbered citations, a note on citation verification, and the reference list"></a>
+
+*A finished report: summary, themed sections with numbered citations, the citation-check result and
+the generated reference list (demo data with placeholder sources).*
+
 ## Features
 
 - **Web dashboard**: create topics, see past topics, watch live status (phase, progress, activity
