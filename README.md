@@ -4,6 +4,10 @@ A self-hosted deep research tool. You give it a topic in a web page; an agent dr
 model** plans research questions, searches the web, reads sources, takes notes, decides whether it
 knows enough, and writes a human-readable report in which **every statement cites its source**.
 
+![The Deep Research dashboard: a topic list with queued, researching and completed topics, and a topic in progress showing its live status and activity log](docs/dashboard.png)
+
+*The dashboard during a research run (demo data).*
+
 ## Features
 
 - **Web dashboard**: create topics, see past topics, watch live status (phase, progress, activity
