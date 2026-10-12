@@ -1,0 +1,13 @@
+# Optional: a private SearXNG metasearch instance for reliable web search.
+#   docker compose up -d
+# then set SEARCH_PROVIDER=searxng and SEARXNG_URL=http://localhost:8888 in .env
+services:
+  searxng:
+    image: searxng/searxng:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8888:8080"
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8888/
